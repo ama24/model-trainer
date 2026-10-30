@@ -260,68 +260,62 @@ class Wizard:
             self.cfg.model.family = "yolo26"
         self.refresh_model_table()
 
+    def class_counts(self) -> dict[int, tuple[int, int]]:
+        """class id -> (objects, images), counted over all splits."""
+        ds, _ = store.open_dataset(project(), self.cfg.dataset)
+        objs: dict[int, int] = {}
+        imgs: dict[int, int] = {}
+        for it in ds.items:
+            for c in {o.cls for o in it.objects}:
+                imgs[c] = imgs.get(c, 0) + 1
+            for o in it.objects:
+                objs[o.cls] = objs.get(o.cls, 0) + 1
+        return {i: (objs.get(i, 0), imgs.get(i, 0)) for i in self.classes}
+
     def render_classes(self) -> None:
         self.class_box.clear()
-        counts = {}
-        if self.health:
-            counts = {int(k): v for k, v in self.health["stats"]["instances_total"].items()}
-        plan = self.cfg.classes
-        drop, merge, rename = (
-            set(plan.get("drop") or []),
-            dict(plan.get("merge") or {}),
-            dict(plan.get("rename") or {}),
-        )
+        self.counts = self.class_counts()
         with self.class_box:
-            with ui.row().classes("items-center"):
+            with ui.row().classes("items-center w-full"):
                 ui.label(f"Classes ({len(self.classes)})").classes("font-medium")
                 help_icon(
-                    "Keep, drop or merge classes. Dropped objects become background (or remove their images, below). "
-                    "Merging joins classes into one (e.g. all sizes of one part). The mapping is saved with the model."
+                    "Keep, drop, merge or rename each class.\n"
+                    "- drop: its objects become background (or their images are removed, see below)\n"
+                    "- merge into: joins this class with another one (e.g. all sizes of one part)\n"
+                    "- rename: gives the class a new name\n"
+                    "The mapping is saved with the model."
                 )
-            names = list(self.classes.values())
+                ui.space()
+                self.class_summary = ui.label().classes("text-sm text-gray-600")
+            with ui.row().classes("items-center w-full gap-2"):
+                ui.input(
+                    placeholder="Search classes", on_change=lambda e: self.filter_classes(e.value)
+                ).props("dense clearable").classes("w-56")
+                ui.button("Keep all", on_click=self.keep_all).props("flat dense")
+                min_n = ui.number(value=50, min=1, step=10).props("dense").classes("w-20")
+                ui.button(
+                    "Drop classes with fewer objects",
+                    on_click=lambda: self.drop_rare(int(min_n.value or 1)),
+                ).props("flat dense").tooltip(
+                    "Drop every class with fewer labelled objects than this"
+                )
+            header = "text-xs font-bold text-gray-600"
+            with ui.row().classes("w-full no-wrap items-center gap-2 px-2"):
+                ui.label("Class").classes(f"{header} w-56")
+                ui.label("Objects").classes(f"{header} w-20 text-right")
+                ui.label("Images").classes(f"{header} w-20 text-right")
+                ui.label("Action").classes(f"{header} w-40")
+                ui.label("Merge into / new name").classes(f"{header} w-56")
+            self.class_rows: dict[str, ui.row] = {}
             with (
-                ui.element("div")
-                .classes("grid gap-x-4 gap-y-1 items-center")
-                .style("grid-template-columns: 220px 90px 180px 200px")
+                ui.scroll_area()
+                .classes("w-full border rounded")
+                .style(f"height: {min(420, 44 * len(self.classes) + 10)}px")
             ):
-                for h in ("Class", "Objects", "Action", "Merge into / new name"):
-                    ui.label(h).classes("text-xs font-bold text-gray-600")
                 for i, n in self.classes.items():
-                    action = (
-                        "drop"
-                        if n in drop
-                        else "merge"
-                        if n in merge
-                        else "rename"
-                        if n in rename
-                        else "keep"
-                    )
-                    ui.label(n)
-                    ui.label(str(counts.get(i, "?")))
-                    sel = ui.select(
-                        {
-                            "keep": "keep",
-                            "drop": "drop",
-                            "merge": "merge into...",
-                            "rename": "rename to...",
-                        },
-                        value=action,
-                    ).props("dense")
-                    target = ui.input(value=merge.get(n) or rename.get(n) or "").props(
-                        "dense"
-                    )  # free text: new names allowed
-                    target.set_visibility(action in ("merge", "rename"))
-                    sel.on_value_change(
-                        lambda e, n=n, t=target: (
-                            t.set_visibility(e.value in ("merge", "rename")),
-                            self.class_action(n, e.value, t.value),
-                        )
-                    )
-                    target.on_value_change(
-                        lambda e, n=n, s=sel: self.class_action(n, s.value, e.value)
-                    )
-            ui.label("Merge targets: " + ", ".join(names)).classes("text-xs text-gray-500")
+                    self.class_row(i, n)
             if not self.simple:
+                plan = self.cfg.classes
                 ui.radio(
                     {
                         "background": "Dropped objects become background",
@@ -330,6 +324,83 @@ class Wizard:
                     value=plan.get("dropped_images", "background"),
                     on_change=lambda e: plan.update(dropped_images=e.value),
                 ).props("inline")
+        self.update_class_summary()
+
+    def class_row(self, i: int, n: str) -> None:
+        plan = self.cfg.classes
+        merge, rename = dict(plan.get("merge") or {}), dict(plan.get("rename") or {})
+        action = (
+            "drop"
+            if n in (plan.get("drop") or [])
+            else "merge"
+            if n in merge
+            else "rename"
+            if n in rename
+            else "keep"
+        )
+        objs, imgs = self.counts.get(i, (0, 0))
+        colour = "text-red-700" if objs == 0 else "text-orange-700" if objs < 50 else ""
+        others = [m for m in self.classes.values() if m != n]
+        with ui.row().classes("w-full no-wrap items-center gap-2 px-2 py-1 border-b") as row:
+            ui.label(n).classes("w-56 truncate").tooltip(n)
+            ui.label(str(objs)).classes(f"w-20 text-right {colour}")
+            ui.label(str(imgs)).classes("w-20 text-right")
+            sel = (
+                ui.select(
+                    {
+                        "keep": "keep",
+                        "drop": "drop",
+                        "merge": "merge into...",
+                        "rename": "rename to...",
+                    },
+                    value=action,
+                )
+                .props("dense outlined")
+                .classes("w-40")
+            )
+            target = (
+                ui.select(
+                    others,
+                    value=merge.get(n) or rename.get(n),
+                    new_value_mode="add-unique",
+                    with_input=True,
+                )
+                .props("dense outlined")
+                .classes("w-56")
+            )  # an existing class, or type a new name
+            target.set_enabled(action in ("merge", "rename"))
+
+            def on_action(e: Any, n: str = n, t: Any = target) -> None:
+                t.set_enabled(e.value in ("merge", "rename"))
+                self.class_action(n, e.value, t.value or "")
+
+            sel.on_value_change(on_action)
+            target.on_value_change(
+                lambda e, n=n, s=sel: self.class_action(n, s.value, e.value or "")
+            )
+        self.class_rows[n] = row
+
+    def filter_classes(self, text: str | None) -> None:
+        q = (text or "").lower()
+        for n, row in self.class_rows.items():
+            row.set_visibility(q in n.lower())
+
+    def keep_all(self) -> None:
+        self.cfg.classes.update(drop=[], merge={}, rename={})
+        self.render_classes()
+
+    def drop_rare(self, min_objects: int) -> None:
+        rare = [n for i, n in self.classes.items() if self.counts.get(i, (0, 0))[0] < min_objects]
+        plan = self.cfg.classes
+        plan["drop"] = sorted(set(plan.get("drop") or []) | set(rare))
+        ui.notify(
+            f"{len(rare)} class(es) with fewer than {min_objects} objects dropped", type="info"
+        )
+        self.render_classes()
+
+    def update_class_summary(self) -> None:
+        if hasattr(self, "class_summary"):
+            self.class_summary.text = self._class_summary()
 
     def class_action(self, name: str, action: str, target: str) -> None:
         plan = self.cfg.classes
@@ -343,6 +414,7 @@ class Wizard:
         elif action == "rename" and target:
             rename[name] = target
         plan.update(drop=drop, merge=merge, rename=rename)
+        self.update_class_summary()
 
     # ------------------------------------------------------------------- 2 model
     def step_model(self) -> None:

@@ -165,3 +165,33 @@ def test_store_import_fingerprint_and_health(workspace, yolo_seg):
     store.refresh(proj, "shapes")
     store._CACHE.clear()
     assert not store.open_dataset(proj, "shapes")[1]["changed"]
+
+
+def test_folder_beside_its_yaml_gets_the_class_names(tmp_path):
+    """Exporters write <out>/seg.yaml next to <out>/seg/: importing the folder must find the names."""
+    import shutil
+
+    from conftest import make_yolo
+
+    src = make_yolo(tmp_path / "src", groups=False)
+    out = tmp_path / "export"
+    shutil.copytree(src / "images", out / "seg" / "images")
+    shutil.copytree(src / "labels", out / "seg" / "labels")
+    (out / "seg.yaml").write_text(
+        f"path: {(out / 'seg').as_posix()}\ntrain: images/train\nval: images/val\nnames:\n  0: square\n  1: circle\n  2: triangle\n"
+    )
+    (out / "pose.yaml").write_text("path: pose\ntrain: images/train\nval: images/val\nkpt_shape: [3, 3]\nnames:\n  0: x\n")
+    ds = formats.load(out / "seg")
+    assert ds.names == {0: "square", 1: "circle", 2: "triangle"} and not formats.placeholder_names(ds.names)
+    with pytest.raises(formats.MultipleDatasets) as exc:
+        formats.load(out)
+    opts = {o["path"].split("\\")[-1].split("/")[-1]: o for o in exc.value.options}
+    assert set(opts) == {"seg.yaml", "pose.yaml"} and opts["pose.yaml"]["labels"] == "keypoints"
+    assert len(formats.candidates(out)) == 2 and len(formats.candidates(out / "seg")) == 1
+
+
+def test_classes_txt_names_a_bare_folder(yolo_det):
+    (yolo_det / "data.yaml").unlink()
+    assert formats.placeholder_names(formats.load(yolo_det).names) == [0, 1, 2]
+    (yolo_det / "classes.txt").write_text("square\ncircle\ntriangle\n")
+    assert formats.load(yolo_det).names == {0: "square", 1: "circle", 2: "triangle"}

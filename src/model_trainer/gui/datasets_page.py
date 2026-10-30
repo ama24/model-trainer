@@ -9,7 +9,7 @@ from typing import Any
 from nicegui import run, ui
 
 from .. import params as P
-from ..datasets import health, render, store
+from ..datasets import formats, health, render, store
 from ..datasets.formats import TASK_LABELS
 from .common import (
     LEVEL_COLOUR,
@@ -94,6 +94,27 @@ def import_dialog() -> ui.dialog:
             )
         obb = ui.checkbox("8-number label lines are rotated boxes (OBB), not 4-point polygons")
         status = ui.label().classes("text-sm")
+        choice_box = ui.column().classes("w-full")
+
+        def choose(options: list[dict[str, Any]]) -> None:
+            """The folder holds several datasets: let the user pick the file."""
+            choice_box.clear()
+            with choice_box:
+                ui.label(
+                    f"This folder holds {len(options)} datasets. Each file is a separate dataset "
+                    "(often one per model or task). Pick the one to import:"
+                ).classes("text-sm font-medium")
+                for o in options:
+                    with ui.card().classes("w-full p-2").props("flat bordered"):
+                        with ui.row().classes("items-center w-full no-wrap"):
+                            with ui.column().classes("gap-0 grow"):
+                                ui.label(Path(o["path"]).name).classes("font-bold")
+                                ui.label(
+                                    f"{o.get('labels', '')} - {o.get('classes', '?')} classes: {o.get('examples', '')}"
+                                ).classes("text-xs text-gray-600")
+                            ui.button(
+                                "Import this", on_click=lambda o=o: do_import(o["path"])
+                            ).props("outline dense").mark(f"pick-{Path(o['path']).stem}")
 
         async def do_import(p: str | None = None) -> None:
             src = (p or path.value or "").strip().strip('"')
@@ -101,6 +122,17 @@ def import_dialog() -> ui.dialog:
                 status.text = "Enter a path first."
                 return
             status.text = "Reading the dataset..."
+            if p is None:
+                try:
+                    options = await run.io_bound(formats.candidates, src)
+                except Exception as exc:  # noqa: BLE001 - shown to the user
+                    status.text = f"Could not read {src}: {exc}"
+                    return
+                if len(options) > 1:
+                    status.text = ""
+                    choose(options)
+                    return
+                src = options[0]["path"]
             try:
                 m = await run.io_bound(
                     store.import_dataset,
@@ -113,7 +145,15 @@ def import_dialog() -> ui.dialog:
             except Exception as exc:  # noqa: BLE001 - shown to the user
                 status.text = f"Could not import: {exc}"
                 return
-            ui.notify(f"Imported {m['name']}", type="positive")
+            missing = formats.placeholder_names({int(k): v for k, v in m["classes"].items()})
+            if missing:
+                ui.notify(
+                    f"Imported, but {len(missing)} class(es) have no name (shown as class_N): see the dataset page",
+                    type="warning",
+                    multi_line=True,
+                )
+            else:
+                ui.notify(f"Imported {m['name']}", type="positive")
             dlg.close()
             ui.navigate.to(f"/dataset/{m['name']}")
 
@@ -187,6 +227,18 @@ def dataset_page(name: str) -> None:
             for t, why in m["tasks"].items()
         ]
         ui.label("Tasks: " + "; ".join(tasks)).classes("text-sm")
+        missing = formats.placeholder_names({int(k): v for k, v in m["classes"].items()})
+        if missing:
+            with ui.card().classes("w-full bg-orange-50"):
+                ui.label(
+                    f"{len(missing)} of {len(m['classes'])} classes have no name (shown as class_0, class_1, ...)."
+                ).classes("font-bold text-orange-900")
+                ui.label(
+                    "The class names live in the dataset's .yaml file, which was not found. This usually happens "
+                    "when you import the images/labels folder (e.g. .../seg) instead of the .yaml next to it "
+                    "(.../seg.yaml). Remove this dataset and import the .yaml file, or put a classes.txt "
+                    "(one name per line) next to the images. You can also rename classes in the wizard."
+                ).classes("text-sm text-orange-900")
         with ui.tabs().classes("w-full") as tabs:
             t_health = ui.tab("Health report", icon="health_and_safety")
             t_gallery = ui.tab("Gallery", icon="grid_view")

@@ -83,3 +83,31 @@ async def test_run_page_of_created_run(app_main, workspace):
         await user.should_see("Results appear when training ends")
         user.find(kind=ui.button, content="Copy & change").click()
         await user.should_see("What should the model do?")
+
+
+@pytest.mark.anyio
+async def test_wizard_class_table_and_bulk_drop(app_main):
+    async with user_simulation(main_file=app_main) as user:
+        await user.open("/new?dataset=shapes")
+        await user.should_see("Merge into / new name")
+        await user.should_see("triangle")
+        await user.should_see("3 classes")
+        user.find("Drop classes with fewer objects").click()
+        await user.should_see("dropped")
+
+
+@pytest.mark.anyio
+async def test_import_asks_which_dataset(app_main, tmp_path):
+    from conftest import make_yolo
+
+    src = make_yolo(tmp_path / "multi", groups=False)
+    (src / "other.yaml").write_text((src / "data.yaml").read_text())
+    (src / "data.yaml").rename(src / "first.yaml")
+    async with user_simulation(main_file=app_main) as user:
+        await user.open("/datasets")
+        user.find(marker="import").click()
+        user.find(marker="path").type(str(src))
+        user.find(marker="do-import").click()
+        await user.should_see("This folder holds 2 datasets", retries=50)
+        user.find(marker="pick-other").click()
+        await user.should_see("Health report", retries=50)

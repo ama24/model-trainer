@@ -14,6 +14,7 @@ one scene) so they are never split between training and validation.
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import json
 import logging
@@ -109,6 +110,73 @@ class Dataset:
 # --------------------------------------------------------------------------- detection
 
 
+class MultipleDatasets(ValueError):
+    """The folder holds several dataset files: the user has to pick one (see `candidates`)."""
+
+    def __init__(self, path: Path, options: list[dict[str, Any]]) -> None:
+        self.path, self.options = path, options
+        names = ", ".join(Path(o["path"]).name for o in options)
+        super().__init__(f"{path} holds {len(options)} datasets ({names}): choose one of the files")
+
+
+def describe_yaml(p: Path) -> dict[str, Any]:
+    """What a dataset yaml holds, for the 'which dataset?' choice."""
+    d = read_yaml(p) or {}
+    names = d.get("names") or {}
+    if isinstance(names, list):
+        names = dict(enumerate(names))
+    kind = (
+        "keypoints"
+        if d.get("kpt_shape")
+        else "rotated boxes"
+        if "obb" in p.stem.lower()
+        else "boxes or masks"
+    )
+    shown = [str(v) for _, v in sorted(names.items(), key=lambda kv: int(kv[0]))][:6]
+    return {
+        "path": str(p),
+        "format": "yolo",
+        "labels": kind,
+        "classes": len(names),
+        "examples": ", ".join(shown) + (", ..." if len(names) > 6 else ""),
+    }
+
+
+def candidates(path: str | Path) -> list[dict[str, Any]]:
+    """Every dataset found at `path` (normally one; a folder can hold several dataset yamls)."""
+    path = Path(path)
+    if path.is_file() or not path.is_dir():
+        return [{"path": str(path), "format": detect_format(path)[0]}]
+    yamls = [q for q in sorted(path.glob("*.y*ml")) if _is_yolo_yaml(q)]
+    if yamls:
+        return [describe_yaml(q) for q in yamls]
+    own = yaml_for_folder(path)
+    if own is not None:
+        return [describe_yaml(own)]
+    fmt, src = detect_format(path)
+    return [{"path": str(src), "format": fmt}]
+
+
+def yaml_for_folder(folder: Path) -> Path | None:
+    """The dataset yaml next to an images/labels folder, e.g. <export>/seg.yaml for <export>/seg/.
+
+    Exporters often write the yaml beside the folder, not inside it. Without it the class names are
+    unknown, so look for a yaml in the parent whose `path` is this folder or whose name matches it.
+    """
+    parent = folder.parent
+    found = []
+    for q in sorted(parent.glob("*.y*ml")):
+        if not _is_yolo_yaml(q):
+            continue
+        d = read_yaml(q) or {}
+        target = Path(str(d.get("path") or ""))
+        if not target.is_absolute():
+            target = (parent / target).resolve()
+        if q.stem == folder.name or target == folder.resolve():
+            found.append(q)
+    return found[0] if found else None
+
+
 def detect_format(path: Path) -> tuple[str, Path]:
     """(format, the file or folder to read) for a dataset folder, yaml or json."""
     path = Path(path)
@@ -121,20 +189,51 @@ def detect_format(path: Path) -> tuple[str, Path]:
     if not path.is_dir():
         raise FileNotFoundError(path)
     yamls = [p for p in sorted(path.glob("*.y*ml")) if _is_yolo_yaml(p)]
-    if yamls:
-        # prefer data.yaml / dataset.yaml, then the first one
-        yamls.sort(key=lambda p: (p.stem not in ("data", "dataset"), p.name))
+    if len(yamls) == 1:
         return "yolo", yamls[0]
+    if yamls:
+        preferred = [p for p in yamls if p.stem in ("data", "dataset")]
+        if len(preferred) == 1:
+            return "yolo", preferred[0]
+        raise MultipleDatasets(path, [describe_yaml(p) for p in yamls])
     jsons = [p for p in sorted(path.rglob("*.json")) if _is_coco_json(p)]
     if jsons:
         return "coco", path
     if (path / "images").is_dir() and (path / "labels").is_dir():
-        return "yolo", path  # images/labels folders without a yaml
+        own = yaml_for_folder(path)
+        return "yolo", own if own is not None else path  # the yaml may sit beside the folder
     if _class_folders(path):
         return "folders", path
     raise ValueError(
         f"{path}: no dataset found. Expected a YOLO dataset yaml, COCO json files, or one folder per class."
     )
+
+
+def names_from_file(folder: Path) -> dict[int, str]:
+    """Class names from classes.txt / obj.names / classes.yaml in the folder or its parent."""
+    for d in (folder, folder.parent):
+        for name in ("classes.txt", "obj.names", "names.txt"):
+            f = d / name
+            if f.is_file():
+                lines = [
+                    ln.strip() for ln in f.read_text(encoding="utf-8").splitlines() if ln.strip()
+                ]
+                return dict(enumerate(lines))
+        f = d / "classes.yaml"
+        if f.is_file():
+            data = read_yaml(f) or {}
+            names = data.get("names", data) if isinstance(data, dict) else data
+            if isinstance(names, list):
+                return dict(enumerate(map(str, names)))
+            if isinstance(names, dict):
+                with contextlib.suppress(ValueError, TypeError):
+                    return {int(k): str(v) for k, v in names.items()}
+    return {}
+
+
+def placeholder_names(names: dict[int, str]) -> list[int]:
+    """Class ids whose real name is unknown (shown as class_<id>)."""
+    return [i for i, n in names.items() if n == f"class_{i}"]
 
 
 def _is_yolo_yaml(p: Path) -> bool:
@@ -265,7 +364,7 @@ def _poly_box(p: Sequence[float]) -> tuple[float, float, float, float]:
 
 def load_yolo(src: Path, label_kind: str | None = None) -> Dataset:
     if src.is_dir():  # images/ + labels/ without a yaml: splits from the folder names
-        cfg: dict[str, Any] = {"path": str(src), "names": {}}
+        cfg: dict[str, Any] = {"path": str(src), "names": names_from_file(src)}
         for s in SPLITS:
             if (src / "images" / s).is_dir():
                 cfg[s] = f"images/{s}"
