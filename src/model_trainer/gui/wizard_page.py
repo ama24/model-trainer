@@ -38,7 +38,8 @@ def wizard_page(
 ) -> None:
     with frame("New run"):
         proj = project()
-        names = proj.datasets()
+        # datasets whose files are gone cannot be trained on (the datasets page explains why)
+        names = [n for n in proj.datasets() if not store.source_missing(store.manifest(proj, n))]
         if not names:
             empty("Import a dataset first.", ("Go to datasets", "/datasets"))
             return

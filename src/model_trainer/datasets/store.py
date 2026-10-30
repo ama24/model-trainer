@@ -97,6 +97,11 @@ def manifest(project: Project, name: str) -> dict[str, Any]:
     return read_json(dataset_dir(project, name) / "dataset.json")
 
 
+def source_missing(m: dict[str, Any]) -> bool:
+    """The files the dataset was imported from are gone (moved, deleted, or being rebuilt)."""
+    return not Path(m["source"]).exists()
+
+
 def open_dataset(project: Project, name: str) -> tuple[Dataset, dict[str, Any]]:
     """The dataset (cached in memory) and its manifest; manifest['changed'] if files moved on."""
     d = dataset_dir(project, name)

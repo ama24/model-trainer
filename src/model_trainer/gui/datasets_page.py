@@ -58,6 +58,7 @@ def datasets_page() -> None:
                     "val": m["images"].get("val", 0),
                     "test": m["images"].get("test", 0),
                     "imported": m["imported"][:16].replace("T", " "),
+                    "files": "MISSING" if store.source_missing(m) else "ok",
                 }
             )
         cols = [
@@ -214,7 +215,7 @@ def dataset_page(name: str) -> None:
             ui.button(
                 "Re-read files",
                 icon="refresh",
-                on_click=lambda: (store.refresh(proj, name), ui.navigate.reload()),
+                on_click=lambda: _reread(name),
             ).props("flat").tooltip(
                 "Accept the current files (after you fixed labels) as the dataset"
             )
@@ -222,6 +223,19 @@ def dataset_page(name: str) -> None:
                 "flat color=negative"
             ).tooltip("Remove from the project (files stay where they are)")
         ui.label(f"Source: {m['source']}").classes("text-sm text-gray-500")
+        if store.source_missing(m):
+            with ui.card().classes("w-full bg-orange-50"):
+                ui.label("The dataset's files are not there any more.").classes(
+                    "font-bold text-orange-900"
+                )
+                ui.label(
+                    f"{m['source']} was not found. Importing only records where a dataset lives, it "
+                    "does not copy it, so the files were moved, deleted, or are being rebuilt (e.g. "
+                    "screw-synth's label export replaces its dataset folder). Runs you already "
+                    "trained keep their own copy. Once the files are back, click 'Re-read files'; "
+                    "otherwise remove the dataset (the bin icon above) and import it again."
+                ).classes("text-sm text-orange-900")
+            return
         tasks = [
             f"{TASK_LABELS[t]}" + ("" if not why else f" (not possible: {why})")
             for t, why in m["tasks"].items()
@@ -250,6 +264,14 @@ def dataset_page(name: str) -> None:
                 Gallery(name).build()
             with ui.tab_panel(t_aug):
                 AugPreview(name, m["default_task"]).build()
+
+
+def _reread(name: str) -> None:
+    if store.source_missing(store.manifest(project(), name)):
+        ui.notify("The files are still missing", type="warning")
+        return
+    store.refresh(project(), name)
+    ui.navigate.reload()
 
 
 def confirm_delete(name: str) -> None:

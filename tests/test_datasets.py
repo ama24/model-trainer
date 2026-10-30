@@ -217,3 +217,17 @@ def test_classes_txt_names_a_bare_folder(yolo_det):
     assert formats.placeholder_names(formats.load(yolo_det).names) == [0, 1, 2]
     (yolo_det / "classes.txt").write_text("square\ncircle\ntriangle\n")
     assert formats.load(yolo_det).names == {0: "square", 1: "circle", 2: "triangle"}
+
+
+def test_dataset_with_missing_files_can_still_be_removed(workspace, yolo_seg, tmp_path):
+    import shutil
+
+    src = tmp_path / "moved"
+    shutil.copytree(yolo_seg, src)
+    proj = workspace.project("demo")
+    m = store.import_dataset(proj, src, name="gone")
+    assert not store.source_missing(m)
+    shutil.rmtree(src)  # e.g. screw-synth rebuilding its dataset folder
+    assert store.source_missing(store.manifest(proj, "gone"))
+    store.delete_dataset(proj, "gone")
+    assert proj.datasets() == []
