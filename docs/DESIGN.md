@@ -141,7 +141,9 @@ Every step can be saved as a template.
   - the class mapping and the settings;
   - package versions, GPU and driver.
   - **Resume refuses if the dataset changed**, and shows what changed.
-- GPU out of memory: retry automatically with a smaller batch, and log it.
+- Out of memory: save lighter settings (GPU: half the batch; RAM: half the workers, then the batch), log
+  it, and restart the worker as a new process that resumes from the last epoch (`--after=<pid>` waits for
+  the old process to exit). Retrying inside the same process leaked GPU memory and data loader processes.
 - Windows is kept awake during training.
 - Disk space is checked before the start and during the run.
 

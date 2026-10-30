@@ -286,38 +286,57 @@ def test_cli_dataset_commands(workspace, yolo_det, capsys):
     assert "created" in capsys.readouterr().out
 
 
-def test_out_of_memory_retries_with_half_the_batch(workspace, monkeypatch):
+def test_out_of_memory_restarts_in_a_fresh_process_with_half_the_batch(workspace, monkeypatch):
     run = Run.create(workspace.project("default"), _cfg())
     w = worker.Worker(run)
     monkeypatch.setattr(w, "prepare_data", lambda: None)
-    calls = []
 
-    def fit(mode, args, device):
-        calls.append((mode, args.get("batch")))
-        if len(calls) < 3:  # AutoBatch picked 7; crowded images need far more memory
-            w.batch_used = 7 if len(calls) == 1 else 3
-            raise RuntimeError("CUDA out of memory. Tried to allocate 592.00 MiB")
+    def fit(mode, args, device):  # AutoBatch picked 7; crowded images need far more memory
+        w.batch_used = 7
+        raise RuntimeError("CUDA out of memory. Tried to allocate 592.00 MiB")
 
     monkeypatch.setattr(w, "_fit", fit)
-    assert w.train("start") == "done"
-    assert calls == [("start", -1), ("start", 3), ("start", 1)]
-    assert run.config.train["batch"] == 1  # a later resume keeps the batch that fits
-    assert any("continuing with batch 3" in e.get("text", str(e)) for e in run.events())
+    assert w.train("start") == "relaunch"
+    assert run.config.train["batch"] == 3  # the restart and later resumes keep the batch that fits
+    assert any("restarting with batch 3" in e.get("text", str(e)) for e in run.events())
+    assert w.relaunch_mode("start") == "start"  # no finished epoch yet
+    run.resume_ckpt.parent.mkdir(parents=True, exist_ok=True)
+    run.resume_ckpt.write_bytes(b"x")
+    assert w.relaunch_mode("start") == "resume" and w.relaunch_mode("extend:50") == "extend:50"
+
+
+def test_relaunch_starts_a_new_worker_after_the_old_one(workspace, monkeypatch):
+    import os
+
+    run = Run.create(workspace.project("default"), _cfg())
+    monkeypatch.setattr(worker.Worker, "write_env", lambda self: None)
+    monkeypatch.setattr(worker.Worker, "train", lambda self, mode: "relaunch")
+    finished, started = [], []
+    monkeypatch.setattr(worker.Worker, "finish", lambda self, outcome: finished.append(outcome))
+    monkeypatch.setattr(
+        Manager, "start_process", lambda self, run, mode, after=None: started.append((mode, after))
+    )
+    assert worker.main([str(run.path), "start"]) == 0
+    assert finished == [] and started == [("start", os.getpid())]
 
 
 def test_other_errors_and_batch_one_are_not_retried(workspace, monkeypatch):
     w = worker.Worker(Run.create(workspace.project("default"), _cfg()))
+    gpu = RuntimeError("CUDA out of memory")
     w.batch_used = 1
-    assert w._smaller_batch(RuntimeError("CUDA out of memory")) is None
+    assert w._lighter_settings(gpu, {"workers": 8}) is None
     w.batch_used = 8
-    assert w._smaller_batch(ValueError("bad label")) is None
-    assert w._smaller_batch(RuntimeError("CUDA out of memory")) == 4
+    assert w._lighter_settings(ValueError("bad label"), {"workers": 8}) is None
+    assert w._lighter_settings(gpu, {"workers": 8})[0] == {"batch": 4}
 
 
-def test_ram_exhaustion_in_the_data_loader_is_retried_too(workspace):
+def test_ram_exhaustion_in_the_data_loader_lowers_the_workers_first(workspace):
     w = worker.Worker(Run.create(workspace.project("default"), _cfg()))
-    w.batch_used = 32
-    assert (
-        w._smaller_batch(RuntimeError("Caught MemoryError in DataLoader worker process 0.")) == 16
-    )
-    assert w._smaller_batch(OSError("[WinError 1455] The paging file is too small for this")) == 16
+    w.batch_used = 4
+    ram = RuntimeError("Caught MemoryError in DataLoader worker process 0.")
+    assert w._lighter_settings(ram, {"workers": 8})[0] == {"workers": 4}
+    paging = OSError("[WinError 1455] The paging file is too small for this")
+    assert w._lighter_settings(paging, {"workers": 4})[0] == {"workers": 2}
+    assert w._lighter_settings(ram, {"workers": 2})[0] == {"batch": 2}
+    w.batch_used = 1
+    assert w._lighter_settings(ram, {"workers": 2}) is None
