@@ -133,6 +133,21 @@ def resplit(items: Sequence[Item], plan: SplitPlan) -> dict[str, str]:
             out[it.key] = best
         assigned_imgs[best] += len(units[u])
         assigned_cls[best].update(counts[u])
+    # few groups: the greedy pass can leave a small split empty (3 layouts at 85/15 -> 3/0), and
+    # training needs validation images. Every split gets at least one group, taken from the split
+    # holding the most groups, as long as there are enough groups
+    per_split: dict[str, list[str]] = {s: [] for s in ratios}
+    for u in unit_ids:
+        per_split[out[units[u][0].key]].append(u)
+    if len(unit_ids) >= len(ratios):
+        for s in ratios:
+            if not per_split[s]:
+                donor = max(per_split, key=lambda d: len(per_split[d]))
+                u = min(per_split[donor], key=lambda g: len(units[g]))
+                per_split[donor].remove(u)
+                per_split[s].append(u)
+                for it in units[u]:
+                    out[it.key] = s
     return out
 
 
@@ -247,6 +262,13 @@ def prepare(
             raise ValueError(
                 "the dataset has no validation images: choose 're-split' in step 1 of the wizard"
             )
+    if not any(s == "val" for s in new_split.values()):
+        groups = {it.group if (split.by_group and it.group) else it.key for it in ds.items}
+        raise ValueError(
+            f"too few images for a validation set: the dataset holds {len(groups)} group(s) "
+            "(scenes/layouts), and the images of one group always stay in the same split. "
+            "Use a dataset with more scenes"
+        )
     items: list[tuple[Item, str]] = []
     for it in ds.items:
         if "image missing or unreadable" in it.problems:

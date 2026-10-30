@@ -98,6 +98,24 @@ def test_resplit_keeps_groups_and_ratio(yolo_seg):
     assert 4 <= val <= 12
 
 
+def test_resplit_few_groups_still_has_validation(tmp_path):
+    # 3 layouts with removal photos (screw-synth test export): 85/15 used to give 3/0
+    sizes = {"000000": 4, "000001": 3, "000002": 2}
+    items = [
+        formats.Item(tmp_path / f"{g}_{k}.jpg", "train", [formats.Obj(k % 2)], group=g)
+        for g, n in sizes.items()
+        for k in range(n)
+    ]
+    plan = SplitPlan(mode="resplit", ratios={"train": 0.85, "val": 0.15})
+    out = prepare.resplit(items, plan)
+    assert set(out.values()) == {"train", "val"}
+    val_groups = {it.group for it in items if out[it.key] == "val"}
+    assert len(val_groups) == 1  # one whole layout, never split
+    with pytest.raises(ValueError, match="too few images for a validation set"):
+        one_layout = formats.Dataset("t", tmp_path, "yolo", {0: "a", 1: "b"}, items[:4], "boxes")
+        prepare.prepare(one_layout, tmp_path / "data", "detect", split=plan)
+
+
 def test_prepare_detect_with_oversampling(yolo_seg, tmp_path):
     ds = formats.load(yolo_seg)
     m = prepare.prepare(
@@ -180,9 +198,13 @@ def test_folder_beside_its_yaml_gets_the_class_names(tmp_path):
     (out / "seg.yaml").write_text(
         f"path: {(out / 'seg').as_posix()}\ntrain: images/train\nval: images/val\nnames:\n  0: square\n  1: circle\n  2: triangle\n"
     )
-    (out / "pose.yaml").write_text("path: pose\ntrain: images/train\nval: images/val\nkpt_shape: [3, 3]\nnames:\n  0: x\n")
+    (out / "pose.yaml").write_text(
+        "path: pose\ntrain: images/train\nval: images/val\nkpt_shape: [3, 3]\nnames:\n  0: x\n"
+    )
     ds = formats.load(out / "seg")
-    assert ds.names == {0: "square", 1: "circle", 2: "triangle"} and not formats.placeholder_names(ds.names)
+    assert ds.names == {0: "square", 1: "circle", 2: "triangle"} and not formats.placeholder_names(
+        ds.names
+    )
     with pytest.raises(formats.MultipleDatasets) as exc:
         formats.load(out)
     opts = {o["path"].split("\\")[-1].split("/")[-1]: o for o in exc.value.options}
