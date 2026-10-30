@@ -94,7 +94,33 @@ def samples(
                 o.keypoints = [
                     (float(p[0]), float(p[1]), float(p[2]) if len(p) > 2 else 2.0) for p in k
                 ]
-        out.append(draw(pil, objs, names, ("boxes", "keypoints", "labels")))
+        if task == "segment" and "masks" in s:
+            for o, poly in zip(objs, _mask_polygons(s["masks"].numpy(), len(objs))):
+                o.polygon = poly
+        out.append(draw(pil, objs, names, ("boxes", "masks", "keypoints", "labels")))
+    return out
+
+
+def _mask_polygons(masks: np.ndarray, n: int) -> list[list[float] | None]:
+    """Outline of each object's training mask, normalised (the augmented masks the model learns).
+
+    Ultralytics stores either one mask per object (N, h, w) or, with overlap_mask (the default), a
+    single (1, h, w) image where object k has the value k + 1 (a 0/1 mask when there is one object).
+    """
+    import cv2
+
+    h, w = masks.shape[-2:]
+    out: list[list[float] | None] = []
+    for k in range(n):
+        m = masks[0] == k + 1 if masks.shape[0] == 1 else masks[k] > 0
+        contours, _ = cv2.findContours(
+            m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        if not contours:
+            out.append(None)
+            continue
+        c = max(contours, key=cv2.contourArea).reshape(-1, 2).astype(float)
+        out.append(((c + 0.5) / np.array([w, h])).flatten().tolist())
     return out
 
 
