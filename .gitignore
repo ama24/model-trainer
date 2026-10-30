@@ -1,0 +1,12 @@
+
+# model-trainer
+.venv/
+predictions/
+*.pt
+*.onnx
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/

@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "model-trainer"
+version = "0.1.0"
+description = "Friendly, generic app to train YOLO models: dataset health, guided training with pause/resume, evaluation, export"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = [
+    "ultralytics>=8.4",
+    "nicegui>=3.0",
+    "pyyaml>=6.0",
+    "numpy>=1.24",
+    "pillow>=10.0",
+    "truststore>=0.9",  # system certificate store for downloads (see util.trust_system_certificates)
+]
+
+[project.optional-dependencies]
+export = ["onnx>=1.16", "onnxruntime>=1.18"]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+mtrain = "model_trainer.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/model_trainer"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "slow: trains a real (tiny) model or needs a GPU (deselect with -m \"not slow\")",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["E501", "B905", "B008", "SIM117"]  # nested `with` is how NiceGUI layouts read
+
+[tool.ruff.lint.isort]
+known-first-party = ["model_trainer"]

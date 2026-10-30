@@ -1,6 +1,6 @@
 # model-trainer: design
 
-Status: **draft for approval**, 2026-10-29. Nothing is built yet; this document is the build plan.
+Status: approved 2026-10-29; phases 1-3 implemented 2026-10-30 (see README for what exists; SSH training is experimental).
 
 ## Goal
 
