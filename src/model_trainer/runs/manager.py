@@ -147,6 +147,10 @@ class Manager:
 
             launch_remote(self.ws, run, mode)
             return
+        self.start_process(run, mode)
+
+    def start_process(self, run: Run, mode: str, after: int | None = None) -> None:
+        """The worker process on this machine; `after`: wait for that process to exit first."""
         weights_cache = (
             self.ws.cache_dir / "weights"
         )  # Ultralytics downloads base models into the cwd
@@ -157,6 +161,8 @@ class Manager:
         )
         log_fh = run.log_path.open("ab")
         cmd = [sys.executable, "-m", "model_trainer.runs.worker", str(run.path), mode]
+        if after:
+            cmd.append(f"--after={after}")
         env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
         kw: dict[str, Any] = {
             "cwd": weights_cache,

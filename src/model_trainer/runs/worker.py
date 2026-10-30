@@ -39,6 +39,7 @@ from ..util import (
     gpu_status,
     keep_awake,
     now,
+    pid_alive,
     trust_system_certificates,
     write_json,
 )
@@ -413,36 +414,33 @@ class Worker:
             raise RuntimeError(f"less than {MIN_FREE_GB} GB of free disk space")
         args = self.cfg.train_args()
         device = self.cfg.options.device or None
-        while True:
-            try:
-                self._fit(mode, args, device)
-                break
-            except Exception as exc:  # noqa: BLE001 - only out-of-memory is retried
-                batch = self._smaller_batch(exc)
-                if batch is None:
-                    raise
-                self.event(
-                    "out of memory",
-                    f"the GPU ran out of memory with batch {self.batch_used}: "
-                    f"continuing with batch {batch}",
-                    "warn",
-                )
-                args["batch"] = batch
-                cfg = self.cfg
-                cfg.train["batch"] = batch  # later resumes keep the batch that fits
-                self.run.save_config(cfg)
-                if mode == "start" and self.run.resume_ckpt.is_file():
-                    mode = "resume"  # keep the finished epochs
+        try:
+            self._fit(mode, args, device)
+        except Exception as exc:  # noqa: BLE001 - only out-of-memory is retried
+            lighter = self._lighter_settings(exc, args)
+            if lighter is None:
+                raise
+            change, text = lighter
+            self.event("out of memory", text, "warn")
+            cfg = self.cfg
+            cfg.train.update(change)  # the restart and later resumes keep what fits
+            self.run.save_config(cfg)
+            # Not retried in this process: the failed attempt keeps its GPU memory and its data
+            # loader processes alive, so every in-process retry had less memory than the last.
+            return "relaunch"
         if self.pause_requested:
             return "paused"
         return "stopped" if self.stop_requested else "done"
 
-    def _smaller_batch(self, exc: BaseException) -> int | None:
-        """Half the batch after running out of GPU memory; None = give up (other error, batch 1).
+    def _lighter_settings(
+        self, exc: BaseException, args: dict[str, Any]
+    ) -> tuple[dict[str, int], str] | None:
+        """Settings that need less memory after an out-of-memory error; None = give up.
 
         AutoBatch sizes the batch on ordinary images; images with hundreds of objects need much
-        more memory in the loss (target assignment), so the first batches can still run out. Large
-        batches of large images can also exhaust the PC's RAM in the data loader (MemoryError).
+        more memory in the loss (target assignment), so the GPU can still run out: half the batch.
+        The PC's RAM runs out in the data loader (MemoryError, paging file): every worker process
+        holds its own images and masks, so half the workers first, then half the batch.
         """
         text = f"{type(exc).__name__} {exc}".lower()
         memory = any(
@@ -454,16 +452,33 @@ class Worker:
                 "paging file is too small",
             )
         )
-        if not memory or not self.batch_used or self.batch_used <= 1:
+        batch = int(self.batch_used or 0)
+        if not memory:
             return None
-        import gc
+        if "cuda" not in text:  # the PC's RAM, not the GPU
+            workers = int(args.get("workers") or 0)
+            if workers > 2:
+                return {"workers": workers // 2}, (
+                    f"the PC ran out of memory (RAM) with {workers} data loader workers: "
+                    f"restarting with {workers // 2}"
+                )
+            if batch > 1:
+                return {"batch": batch // 2}, (
+                    f"the PC ran out of memory (RAM) with batch {batch}: "
+                    f"restarting with batch {batch // 2}"
+                )
+            return None
+        if batch <= 1:
+            return None
+        return {"batch": batch // 2}, (
+            f"the GPU ran out of memory with batch {batch}: restarting with batch {batch // 2}"
+        )
 
-        gc.collect()
-        with contextlib.suppress(Exception):
-            import torch
-
-            torch.cuda.empty_cache()
-        return max(1, self.batch_used // 2)
+    def relaunch_mode(self, mode: str) -> str:
+        """How the restarted process continues: keep the finished epochs when there are any."""
+        if mode.startswith("extend:"):
+            return mode
+        return "resume" if self.run.resume_ckpt.is_file() else "start"
 
     def _fit(self, mode: str, args: dict[str, Any], device: str | None) -> None:
         from ultralytics import YOLO
@@ -509,6 +524,8 @@ class Worker:
                 atomic_copy(ckpt, last)
             if int(args.get("batch") or -1) > 0:
                 overrides["batch"] = int(args["batch"])  # e.g. lowered after running out of memory
+            if "workers" in self.cfg.train:
+                overrides["workers"] = int(args["workers"])
             model = YOLO(str(last))
             self.attach(model)
             model.train(resume=True, device=device, **overrides)
@@ -592,11 +609,17 @@ def _friendly(exc: BaseException) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    after = next((int(a.split("=", 1)[1]) for a in argv if a.startswith("--after=")), None)
+    argv = [a for a in argv if not a.startswith("--after=")]
     run = Run(Path(argv[0]))
     mode = argv[1] if len(argv) > 1 else "start"
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout
     )
+    if after:  # restarted after running out of memory: wait until the old process let go of it
+        deadline = time.time() + 300
+        while pid_alive(after) and time.time() < deadline:
+            time.sleep(1)
     trust_system_certificates()
     w = Worker(run)
     run.heartbeat(os.getpid())
@@ -606,10 +629,12 @@ def main(argv: list[str] | None = None) -> int:
     run.update_state(pid=os.getpid(), mode=mode)
     w.write_env()
     code = 0
+    outcome = ""
     with keep_awake(f"training {run.id}"):
         try:
             outcome = w.train(mode)
-            w.finish(outcome)
+            if outcome != "relaunch":
+                w.finish(outcome)
         except BaseException as exc:  # noqa: BLE001 - every failure must end up in state.json
             traceback.print_exc()
             reason = _friendly(exc)
@@ -623,9 +648,12 @@ def main(argv: list[str] | None = None) -> int:
             run.clear_command()
             w._stop_hb.set()
             (run.path / "progress.json").unlink(missing_ok=True)
-    with contextlib.suppress(Exception):
-        from .manager import Manager
+    from .manager import Manager
 
+    if outcome == "relaunch":
+        Manager(w.workspace).start_process(run, w.relaunch_mode(mode), after=os.getpid())
+        return code
+    with contextlib.suppress(Exception):
         Manager(w.workspace).start_next_queued()
     return code
 
