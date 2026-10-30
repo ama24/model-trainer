@@ -93,7 +93,8 @@ Every step can be saved as a template.
 3. **Data preparation**
    - Image size, recommended from the object-size check.
    - Rectangular batches.
-   - Cache in RAM or on disk, with the memory it needs.
+   - Cache in RAM or on disk, with the memory it needs. Default `auto`: the worker picks `ram` at the start
+     when 2 x the cache + 4 GB is free (`models.ram_cache_fits`), otherwise off; resumes keep that choice.
    - Number of data loader workers.
 4. **Augmentation**
    - Presets: none, light, standard, strong, custom.

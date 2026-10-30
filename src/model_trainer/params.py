@@ -78,11 +78,12 @@ PARAMS: list[Param] = [
         "Cache images",
         "data",
         "choice",
-        False,
-        "Keep decoded images in RAM or on disk so they are not re-read every epoch.",
-        "off; 'ram' if the dataset fits in memory",
+        "auto",
+        "Keep decoded images in RAM or on disk so they are not re-read every epoch. 'auto' keeps "
+        "them in RAM when they fit in the free memory at the start of training, otherwise off.",
+        "auto",
         "'ram' is fastest but uses a lot of memory; 'disk' saves decoded copies next to the images.",
-        choices=(False, "ram", "disk"),
+        choices=("auto", False, "ram", "disk"),
     ),
     Param(
         "workers",

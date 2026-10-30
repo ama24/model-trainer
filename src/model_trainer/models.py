@@ -176,6 +176,25 @@ def recommend(n_train: int, task: str, vram_gb: float | None, imgsz: int) -> tup
     return "yolo26", size, why
 
 
+def cache_ram_gb(n_images: int, imgsz: int) -> float:
+    """RAM to keep the images in memory: Ultralytics caches them resized, 3 bytes per pixel."""
+    return n_images * imgsz * imgsz * 3 / 1e9
+
+
+def ram_cache_fits(n_images: int, imgsz: int, free_gb: float | None) -> bool:
+    """Ultralytics wants twice the cache size free; 4 GB more stay for training itself."""
+    return free_gb is not None and 2 * cache_ram_gb(n_images, imgsz) + 4 <= free_gb
+
+
+def free_ram_gb() -> float | None:
+    try:
+        import psutil  # installed with Ultralytics
+
+        return psutil.virtual_memory().available / 1e9
+    except Exception:  # noqa: BLE001 - no memory information
+        return None
+
+
 def gpu_memory_gb() -> float | None:
     try:
         import torch

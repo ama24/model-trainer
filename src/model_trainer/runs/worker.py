@@ -40,6 +40,7 @@ from ..util import (
     keep_awake,
     now,
     pid_alive,
+    read_json,
     trust_system_certificates,
     write_json,
 )
@@ -413,6 +414,8 @@ class Worker:
         if free_disk_gb(self.run.path) < MIN_FREE_GB:
             raise RuntimeError(f"less than {MIN_FREE_GB} GB of free disk space")
         args = self.cfg.train_args()
+        if args.get("cache") == "auto":
+            args["cache"] = self._auto_cache(int(args["imgsz"])) if mode == "start" else None
         device = self.cfg.options.device or None
         try:
             self._fit(mode, args, device)
@@ -432,15 +435,36 @@ class Worker:
             return "paused"
         return "stopped" if self.stop_requested else "done"
 
+    def _auto_cache(self, imgsz: int) -> str | bool:
+        """'ram' when the run's images fit in the free memory now (cache: auto), otherwise off."""
+        from ..models import cache_ram_gb, free_ram_gb, ram_cache_fits
+
+        n = sum(read_json(self.run.data_dir / "manifest.json", {}).get("images", {}).values())
+        need, free = cache_ram_gb(n, imgsz), free_ram_gb()
+        if ram_cache_fits(n, imgsz, free):
+            self.event(
+                "cache",
+                f"images are kept in RAM for faster epochs (about {need:.1f} GB, "
+                f"{free:.1f} GB free)",
+            )
+            return "ram"
+        if free is not None:
+            self.event(
+                "cache",
+                f"images are read from disk every epoch: keeping them in RAM needs about "
+                f"{need:.1f} GB plus room for training, {free:.1f} GB free",
+            )
+        return False
+
     def _lighter_settings(
         self, exc: BaseException, args: dict[str, Any]
-    ) -> tuple[dict[str, int], str] | None:
+    ) -> tuple[dict[str, Any], str] | None:
         """Settings that need less memory after an out-of-memory error; None = give up.
 
         AutoBatch sizes the batch on ordinary images; images with hundreds of objects need much
         more memory in the loss (target assignment), so the GPU can still run out: half the batch.
-        The PC's RAM runs out in the data loader (MemoryError, paging file): every worker process
-        holds its own images and masks, so half the workers first, then half the batch.
+        The PC's RAM runs out in the data loader (MemoryError, paging file): the image cache goes
+        first, then half the workers (each holds its own images and masks), then half the batch.
         """
         text = f"{type(exc).__name__} {exc}".lower()
         memory = any(
@@ -456,6 +480,11 @@ class Worker:
         if not memory:
             return None
         if "cuda" not in text:  # the PC's RAM, not the GPU
+            if args.get("cache") == "ram":
+                return {"cache": False}, (
+                    "the PC ran out of memory (RAM) with the images kept in RAM: "
+                    "restarting without the image cache"
+                )
             workers = int(args.get("workers") or 0)
             if workers > 2:
                 return {"workers": workers // 2}, (
@@ -526,6 +555,8 @@ class Worker:
                 overrides["batch"] = int(args["batch"])  # e.g. lowered after running out of memory
             if "workers" in self.cfg.train:
                 overrides["workers"] = int(args["workers"])
+            if self.cfg.train.get("cache", "auto") != "auto":  # auto: as decided at the start
+                overrides["cache"] = self.cfg.train["cache"]
             model = YOLO(str(last))
             self.attach(model)
             model.train(resume=True, device=device, **overrides)

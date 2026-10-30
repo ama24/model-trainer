@@ -782,6 +782,17 @@ class Wizard:
             )
         self.refresh_review()
 
+    def _cache_summary(self) -> str:
+        cache = self.args.get("cache")
+        if cache != "auto":
+            return {False: "off", "ram": "in RAM", "disk": "on disk"}.get(cache, str(cache))
+        n = int(sum(self.manifest["images"].values()) * self.cfg.subset)
+        imgsz = int(self.args["imgsz"])
+        need, free = M.cache_ram_gb(n, imgsz), M.free_ram_gb()
+        where = "in RAM" if M.ram_cache_fits(n, imgsz, free) else "off (images read from disk)"
+        free_text = f", {free:.1f} GB free now" if free is not None else ""
+        return f"auto: {where} - about {need:.1f} GB{free_text}; decided again when training starts"
+
     def estimates(self) -> dict[str, Any]:
         a = self.args
         m = self.cfg.model
@@ -884,6 +895,7 @@ class Wizard:
                         "Image size / batch",
                         f"{a['imgsz']} px / {a['batch'] if int(a['batch']) > 0 else 'auto (~' + str(e['batch']) + ')'}",
                     ),
+                    ("Image cache", self._cache_summary()),
                     (
                         "Epochs",
                         f"{a['epochs']} (stops early after {a['patience']} epochs without improvement)",
