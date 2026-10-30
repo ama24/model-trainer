@@ -67,6 +67,7 @@ class Worker:
         self.warned: set[str] = set()
         self.best_fitness = -math.inf
         self.best_epoch = 0
+        self.batch_used: int | None = None  # what Ultralytics trains with (after AutoBatch)
 
     # ------------------------------------------------------------------------ helpers
     def event(
@@ -187,6 +188,7 @@ class Worker:
             original()
 
         trainer.final_eval = final_eval
+        self.batch_used = int(trainer.batch_size)
         self.run.set_state(
             "running",
             epochs=int(trainer.epochs),
@@ -406,13 +408,66 @@ class Worker:
 
     # --------------------------------------------------------------------------- main
     def train(self, mode: str) -> str:
-        from ultralytics import YOLO
-
         self.prepare_data()
         if free_disk_gb(self.run.path) < MIN_FREE_GB:
             raise RuntimeError(f"less than {MIN_FREE_GB} GB of free disk space")
         args = self.cfg.train_args()
         device = self.cfg.options.device or None
+        while True:
+            try:
+                self._fit(mode, args, device)
+                break
+            except Exception as exc:  # noqa: BLE001 - only out-of-memory is retried
+                batch = self._smaller_batch(exc)
+                if batch is None:
+                    raise
+                self.event(
+                    "out of memory",
+                    f"the GPU ran out of memory with batch {self.batch_used}: "
+                    f"continuing with batch {batch}",
+                    "warn",
+                )
+                args["batch"] = batch
+                cfg = self.cfg
+                cfg.train["batch"] = batch  # later resumes keep the batch that fits
+                self.run.save_config(cfg)
+                if mode == "start" and self.run.resume_ckpt.is_file():
+                    mode = "resume"  # keep the finished epochs
+        if self.pause_requested:
+            return "paused"
+        return "stopped" if self.stop_requested else "done"
+
+    def _smaller_batch(self, exc: BaseException) -> int | None:
+        """Half the batch after running out of GPU memory; None = give up (other error, batch 1).
+
+        AutoBatch sizes the batch on ordinary images; images with hundreds of objects need much
+        more memory in the loss (target assignment), so the first batches can still run out. Large
+        batches of large images can also exhaust the PC's RAM in the data loader (MemoryError).
+        """
+        text = f"{type(exc).__name__} {exc}".lower()
+        memory = any(
+            s in text
+            for s in (
+                "out of memory",
+                "memoryerror",
+                "not enough memory",
+                "paging file is too small",
+            )
+        )
+        if not memory or not self.batch_used or self.batch_used <= 1:
+            return None
+        import gc
+
+        gc.collect()
+        with contextlib.suppress(Exception):
+            import torch
+
+            torch.cuda.empty_cache()
+        return max(1, self.batch_used // 2)
+
+    def _fit(self, mode: str, args: dict[str, Any], device: str | None) -> None:
+        from ultralytics import YOLO
+
         if mode == "start":
             if self.cfg.task == "pose" and float(args.get("fliplr", 0)) > 0:
                 data = json.loads(json.dumps(_yaml(self.run.data_dir / "data.yaml")))
@@ -452,12 +507,11 @@ class Worker:
                 self.event("extend", f"extending to {epochs} epochs")
             else:
                 atomic_copy(ckpt, last)
+            if int(args.get("batch") or -1) > 0:
+                overrides["batch"] = int(args["batch"])  # e.g. lowered after running out of memory
             model = YOLO(str(last))
             self.attach(model)
             model.train(resume=True, device=device, **overrides)
-        if self.pause_requested:
-            return "paused"
-        return "stopped" if self.stop_requested else "done"
 
     def finish(self, outcome: str) -> None:
         from ..evaluate import evaluate_run, package

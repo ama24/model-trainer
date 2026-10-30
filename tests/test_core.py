@@ -284,3 +284,40 @@ def test_cli_dataset_commands(workspace, yolo_det, capsys):
     )
     assert main(["run", "list", "--workspace", str(workspace.root)]) == 0
     assert "created" in capsys.readouterr().out
+
+
+def test_out_of_memory_retries_with_half_the_batch(workspace, monkeypatch):
+    run = Run.create(workspace.project("default"), _cfg())
+    w = worker.Worker(run)
+    monkeypatch.setattr(w, "prepare_data", lambda: None)
+    calls = []
+
+    def fit(mode, args, device):
+        calls.append((mode, args.get("batch")))
+        if len(calls) < 3:  # AutoBatch picked 7; crowded images need far more memory
+            w.batch_used = 7 if len(calls) == 1 else 3
+            raise RuntimeError("CUDA out of memory. Tried to allocate 592.00 MiB")
+
+    monkeypatch.setattr(w, "_fit", fit)
+    assert w.train("start") == "done"
+    assert calls == [("start", -1), ("start", 3), ("start", 1)]
+    assert run.config.train["batch"] == 1  # a later resume keeps the batch that fits
+    assert any("continuing with batch 3" in e.get("text", str(e)) for e in run.events())
+
+
+def test_other_errors_and_batch_one_are_not_retried(workspace, monkeypatch):
+    w = worker.Worker(Run.create(workspace.project("default"), _cfg()))
+    w.batch_used = 1
+    assert w._smaller_batch(RuntimeError("CUDA out of memory")) is None
+    w.batch_used = 8
+    assert w._smaller_batch(ValueError("bad label")) is None
+    assert w._smaller_batch(RuntimeError("CUDA out of memory")) == 4
+
+
+def test_ram_exhaustion_in_the_data_loader_is_retried_too(workspace):
+    w = worker.Worker(Run.create(workspace.project("default"), _cfg()))
+    w.batch_used = 32
+    assert (
+        w._smaller_batch(RuntimeError("Caught MemoryError in DataLoader worker process 0.")) == 16
+    )
+    assert w._smaller_batch(OSError("[WinError 1455] The paging file is too small for this")) == 16
