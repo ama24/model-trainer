@@ -57,8 +57,12 @@ Everything (datasets, runs, settings) lives in the **workspace** folder:
 - **Detached training:** training runs in its own process. Closing the browser or the app does not stop it.
 - **No sleep:** the computer is kept awake while training.
 - **Out-of-memory recovery:** when the GPU runs out of memory, training restarts in a fresh process with half
-  the batch size and keeps the finished epochs. When the PC's RAM runs out, it first halves the data loader
-  workers, then the batch. A fresh process is needed because a failed attempt does not give its memory back.
+  the batch size and keeps the finished epochs. When the PC's RAM runs out, it first turns off the image cache,
+  then halves the data loader workers, then the batch. A fresh process is needed because a failed attempt does
+  not give its memory back.
+- **Automatic image cache:** with "Cache images: auto" (the default), the training-size images are kept in RAM
+  when they fit in the free memory at the start of training (twice their size plus 4 GB), for faster epochs.
+  More RAM in the PC is used automatically.
 
 ## Command line
 

@@ -340,3 +340,33 @@ def test_ram_exhaustion_in_the_data_loader_lowers_the_workers_first(workspace):
     assert w._lighter_settings(ram, {"workers": 2})[0] == {"batch": 2}
     w.batch_used = 1
     assert w._lighter_settings(ram, {"workers": 2}) is None
+
+
+def test_ram_cache_is_chosen_when_the_images_fit():
+    assert models.cache_ram_gb(1079, 640) == pytest.approx(1.33, abs=0.01)
+    assert models.ram_cache_fits(1079, 640, free_gb=8.0)
+    assert not models.ram_cache_fits(1079, 640, free_gb=6.0)  # 2 x 1.33 + 4 GB for training
+    assert not models.ram_cache_fits(1079, 640, free_gb=None)
+    assert params.BY_KEY["cache"].default == "auto"
+
+
+def test_auto_cache_is_decided_at_the_start(workspace, monkeypatch):
+    from model_trainer.util import write_json
+
+    run = Run.create(workspace.project("default"), _cfg())
+    w = worker.Worker(run)
+    run.data_dir.mkdir(parents=True, exist_ok=True)
+    write_json(run.data_dir / "manifest.json", {"images": {"train": 973, "val": 106}})
+    monkeypatch.setattr(models, "free_ram_gb", lambda: 8.0)
+    assert w._auto_cache(640) == "ram"
+    monkeypatch.setattr(models, "free_ram_gb", lambda: 5.0)
+    assert w._auto_cache(640) is False
+    assert any("kept in RAM" in e.get("text", "") for e in run.events())
+
+
+def test_ram_exhaustion_drops_the_image_cache_first(workspace):
+    w = worker.Worker(Run.create(workspace.project("default"), _cfg()))
+    w.batch_used = 4
+    ram = RuntimeError("Caught MemoryError in DataLoader worker process 0.")
+    assert w._lighter_settings(ram, {"workers": 8, "cache": "ram"})[0] == {"cache": False}
+    assert w._lighter_settings(ram, {"workers": 8, "cache": False})[0] == {"workers": 4}
